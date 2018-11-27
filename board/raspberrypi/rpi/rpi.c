@@ -24,6 +24,7 @@
 #endif
 #include <watchdog.h>
 #include <dm/pinctrl.h>
+#include <spi.h>
 
 DECLARE_GLOBAL_DATA_PTR;
 
@@ -388,6 +389,100 @@ static void set_serial_number(void)
 	env_set("serial#", serial_string);
 }
 
+#ifdef CONFIG_DM_SPI
+static char *append_overlay(char *overlays, const char *overlay)
+{
+	char *out;
+	int len;
+
+	if (overlays == NULL)
+		return strdup(overlay);
+
+	len = strlen(overlays) + strlen(overlay) + 2;
+	out = malloc(len);
+	if (out == NULL)
+		return overlays;
+
+	snprintf(out, len, "%s %s", overlays, overlay);
+	free(overlays);
+
+	return out;
+}
+
+struct spi_overlay {
+	const char *fdt;
+	int bus;
+	int cs;
+	int mode;
+	int bits;
+	unsigned char din[32];
+	unsigned char dout[32];
+};
+
+static void detect_overlay_spi(void)
+{
+	char *fdt_overlays = NULL;
+	struct spi_overlay *overlay;
+	struct spi_overlay overlays[] = {
+		{
+			.fdt  = "mcp23s17-overlay.dtb",
+			.bus  = 0,
+			.cs   = 0,
+			.mode = SPI_MODE_0,
+			.bits = 24,
+			.din  = { 0x00, 0x00, 0xff },
+			.dout = { 0x41, 0x00, 0x00 },
+		},
+		{ 0 }
+	};
+
+	for (overlay = overlays; overlay->fdt; overlay++) {
+		struct spi_slave *slave;
+		struct udevice *dev;
+		unsigned char din[32];
+		char name[30], *str;
+		int ret;
+
+		printf("Probing overlay: '%s': ", overlay->fdt);
+
+		snprintf(name, sizeof(name), "generic_%d:%d", overlay->bus,
+			 overlay->cs);
+		str = strdup(name);
+		if (!str)
+			return;
+
+		ret = spi_get_bus_and_cs(overlay->bus, overlay->cs, 1000000,
+					 overlay->mode, "spi_generic_drv",
+					 str, &dev, &slave);
+		if (ret)
+			continue;
+
+		ret = spi_claim_bus(slave);
+		if (ret)
+			goto next;
+
+		ret = spi_xfer(slave, overlay->bits, overlay->dout, din,
+			       SPI_XFER_BEGIN | SPI_XFER_END);
+		if (ret)
+			goto next;
+
+		if (memcmp(din, overlay->din, ((overlay->bits + 7) / 8)) != 0) {
+			printf("Not found\n");
+			goto next;
+		}
+
+		printf("Found\n");
+		fdt_overlays = append_overlay(fdt_overlays, overlay->fdt);
+
+next:
+		spi_release_bus(slave);
+	}
+
+	env_set("fdt_overlays", fdt_overlays);
+	free(fdt_overlays);
+}
+#endif /* CONFIG_DM_SPI */
+
 int misc_init_r(void)
 {
 	set_fdt_addr();
@@ -397,6 +492,9 @@ int misc_init_r(void)
 	set_board_info();
 #endif
 	set_serial_number();
+#ifdef CONFIG_DM_SPI
+	detect_overlay_spi();
+#endif
 
 	return 0;
 }
